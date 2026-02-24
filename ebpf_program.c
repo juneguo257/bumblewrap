@@ -7,6 +7,7 @@
 struct key_t {
   char fname[NAME_MAX];
 };
+
 // Map to store secret files and their associated security levels
 BPF_HASH(secret_files, struct key_t, int);
 int syscall__openat(struct pt_regs *ctx, int dfd, const char __user *filename, int flags) {

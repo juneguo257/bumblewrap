@@ -1,3 +1,7 @@
+# how to run:
+# sudo python3 loader.py
+
+import sys
 from bcc import BPF
 import ctypes as ct
 
@@ -10,6 +14,14 @@ def add_secret_file(map, file):
     map[key] = value
 
 def main():
+    # get which files to protect
+    protection_list = []
+    with open("blacklist.txt") as f:
+        for line in f.readlines():
+            if line and line.split(","):
+                file_path, security_level = line.split(",")
+                protection_list.append((file_path, int(security_level)))
+
     # Read BPF Program
     with open("ebpf_program.c") as f:
         bpf_program = f.read()
@@ -21,7 +33,7 @@ def main():
     # Get thee map
     secret_files = b.get_table("secret_files")
     # Add the secret files to the map
-    for file in [("/tmp/secret.txt", 1), ("/tmp/ultra_secret.txt", 2)]:
+    for file in protection_list:
         add_secret_file(secret_files, file)
     try:
         print("Attaching kprobe to sys_openat... Press Ctrl+C to exit.")

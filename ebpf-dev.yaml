@@ -1,5 +1,9 @@
 # --------------- FOR MAC LIMA DEV --------------------
 
+# running lima:
+# limactl start ebpf-dev
+# limactl shell ebpf-dev
+
 # ubuntu 24.04
 images:
 - location: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
