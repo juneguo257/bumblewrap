@@ -1,0 +1,47 @@
+# Bumblewrap Sandbox — Whitelist Configuration
+#
+# Each non-blank, non-comment line is an allowed path.
+#
+#   - Paths ending with '/' are directory prefixes: any absolute path
+#     underneath them is permitted (e.g. /usr/lib/ allows /usr/lib/libc.so).
+#
+#   - Paths without a trailing '/' are exact-match entries.
+#
+# Only absolute paths (starting with /) are subject to the whitelist.
+# Relative paths passed to openat() are allowed through unconditionally.
+#
+# To test the sandbox, try accessing a path NOT listed here, e.g.:
+#     cat /root/.bashrc          # should fail with "Permission denied"
+#     ls /opt/                   # should fail
+#     cat /home/user/secret.txt  # should fail
+
+# ── Core system binaries ──
+/bin/
+/sbin/
+/usr/bin/
+/usr/sbin/
+
+# ── Shared libraries ──
+/lib/
+/lib64/
+/usr/lib/
+/usr/lib64/
+
+# ── System configuration ──
+/etc/
+
+# ── Device nodes ──
+/dev/
+
+# ── Virtual filesystems ──
+/proc/
+/sys/
+
+# ── Runtime state ──
+/run/
+
+# ── Temporary files ──
+/tmp/
+
+# ── Variable data (logs, caches, package state) ──
+/var/
