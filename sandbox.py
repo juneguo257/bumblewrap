@@ -80,7 +80,7 @@ def main():
         bpf_text = f.read()
 
     print("Loading eBPF sandbox program...")
-    b = BPF(text=bpf_text)
+    b = BPF(text=bpf_text, cflags=["-I/usr/src/linux-headers-6.17.0-19/include"])
 
     fnname = b.get_syscall_prefix().decode() + "openat"
     b.attach_kprobe(event=fnname, fn_name="syscall__openat")
