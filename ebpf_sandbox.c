@@ -1,7 +1,7 @@
 #include <uapi/linux/ptrace.h>
-#include "/usr/src/linux-headers-6.17.0-19/include/linux/dcache.h"
-#include "/usr/src/linux-headers-6.17.0-19/include/linux/fs_struct.h"
-#include "/usr/src/linux-headers-6.17.0-19/include/linux/sched.h"
+#include <linux/dcache.h>
+#include <linux/fs_struct.h>
+#include <linux/sched.h>
 #include <linux/path.h>
 #include <linux/fcntl.h>
 

@@ -1,33 +1,77 @@
 #!/usr/bin/env python3
 """
-Bumblewrap Sandbox (Milestone 2)
+Bumblewrap Sandbox (Milestone 3)
 
 Sets up an eBPF-based sandbox with whitelist-based file access control,
 then runs an interactive bash shell under the sandbox.  Only absolute
 paths listed in the whitelist (or under a whitelisted directory prefix)
-are accessible.  Relative paths are not filtered.
+are accessible.  Relative paths are resolved via a best-effort CWD walk.
+
+While the sandbox is running, rules can be modified dynamically via the
+companion tool sandboxctl.py (which writes commands to a named FIFO).
 
 Usage:
     sudo python3 sandbox.py [whitelist_file]
-
-The whitelist file defaults to whitelist.txt in the same directory as
-this script.  See whitelist.txt for format documentation.
 """
 
 import os
 import sys
 import signal
+import threading
+import subprocess
 import ctypes as ct
 from bcc import BPF
 
+CTL_FIFO = "/tmp/bumblewrap_ctl"
+RESP_FILE = "/tmp/bumblewrap_resp"
+
+
+# bpf map helpers
+
+def add_path_to_map(allowed_table, path, value):
+    """Insert a path into the BPF map.  value: 1 = allow, 0 = deny."""
+    key = allowed_table.Key()
+    key.path = path.encode()
+    allowed_table[key] = ct.c_uint32(value)
+
+    if path.endswith("/") and len(path) > 1:
+        key2 = allowed_table.Key()
+        key2.path = path.rstrip("/").encode()
+        allowed_table[key2] = ct.c_uint32(value)
+
+
+def remove_path_from_map(allowed_table, path):
+    """Delete a path (and its no-trailing-slash variant) from the BPF map."""
+    key = allowed_table.Key()
+    key.path = path.encode()
+    try:
+        del allowed_table[key]
+    except KeyError:
+        pass
+
+    if path.endswith("/") and len(path) > 1:
+        key2 = allowed_table.Key()
+        key2.path = path.rstrip("/").encode()
+        try:
+            del allowed_table[key2]
+        except KeyError:
+            pass
+
+
+def list_paths(allowed_table):
+    """Return a sorted, human-readable listing of every map entry."""
+    lines = []
+    for key, value in allowed_table.items():
+        path = key.path.decode("utf-8", errors="replace").rstrip("\x00")
+        tag = "ALLOW" if value.value == 1 else " DENY"
+        lines.append(f"  {tag}  {path}")
+    lines.sort()
+    return "\n".join(lines) if lines else "  (empty)"
+
+
+# whitelist helpers
 
 def parse_whitelist(filepath):
-    """Parse the whitelist file.
-
-    Blank lines and lines starting with '#' are ignored.
-    Paths ending with '/' are treated as directory prefixes (everything
-    underneath is allowed).  Other paths are exact-match entries.
-    """
     paths = []
     with open(filepath) as f:
         for line in f:
@@ -39,24 +83,73 @@ def parse_whitelist(filepath):
 
 
 def populate_whitelist(b, paths):
-    """Insert whitelist entries into the eBPF allowed_paths hash map."""
     allowed = b.get_table("allowed_paths")
     count = 0
     for path in paths:
-        key = allowed.Key()
-        key.path = path.encode()
-        allowed[key] = ct.c_uint32(1)
+        add_path_to_map(allowed, path, 1)
         count += 1
-
-        # For directory prefixes, also allow accessing the directory node
-        # itself without the trailing slash (e.g. openat("/usr", O_DIRECTORY)).
         if path.endswith("/") and len(path) > 1:
-            key2 = allowed.Key()
-            key2.path = path.rstrip("/").encode()
-            allowed[key2] = ct.c_uint32(1)
             count += 1
-
     return count
+
+
+# control loop (runs in a separate thread)
+
+def control_loop(b):
+    """Read newline-delimited commands from CTL_FIFO and modify BPF maps.
+
+    Supported commands (case-insensitive):
+        allow  <path>   — add path as allowed (value 1)
+        deny   <path>   — add path as denied  (value 0, overrides parent allow)
+        remove <path>   — delete path from map entirely
+        list            — dump current rules to RESP_FILE + stdout
+    """
+    allowed = b.get_table("allowed_paths")
+
+    while True:
+        try:
+            # open() blocks until a writer connects
+            with open(CTL_FIFO, "r") as fifo:
+                for raw_line in fifo:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(None, 1)
+                    action = parts[0].lower()
+                    path = parts[1] if len(parts) > 1 else ""
+
+                    if action == "allow" and path:
+                        add_path_to_map(allowed, path, 1)
+                        msg = f"ALLOWED: {path}"
+                    elif action == "deny" and path:
+                        add_path_to_map(allowed, path, 0)
+                        msg = f"DENIED:  {path}"
+                    elif action == "remove" and path:
+                        remove_path_from_map(allowed, path)
+                        msg = f"REMOVED: {path}"
+                    elif action == "list":
+                        listing = list_paths(allowed)
+                        msg = f"Current rules:\n{listing}"
+                        try:
+                            with open(RESP_FILE, "w") as rf:
+                                rf.write(listing + "\n")
+                        except OSError:
+                            pass
+                    else:
+                        msg = f"Unknown command: {line}"
+
+                    print(f"\n[sandbox] {msg}", flush=True)
+        except OSError:
+            break
+        except Exception as e:
+            print(f"\n[sandbox] Control error: {e}", flush=True)
+
+def cleanup_fifo():
+    for p in (CTL_FIFO, RESP_FILE):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
 
 
 def main():
@@ -79,8 +172,11 @@ def main():
     with open(ebpf_path) as f:
         bpf_text = f.read()
 
-    print("Loading eBPF sandbox program...")
-    b = BPF(text=bpf_text, cflags=["-I/usr/src/linux-headers-6.17.0-19/include"])
+    kernel_release = subprocess.check_output(["uname", "-r"]).decode().strip()
+    header_dir = f"/usr/src/linux-headers-{kernel_release}/include"
+
+    print(f"Loading eBPF sandbox program (kernel {kernel_release})...")
+    b = BPF(text=bpf_text, cflags=[f"-I{header_dir}"])
 
     fnname = b.get_syscall_prefix().decode() + "openat"
     b.attach_kprobe(event=fnname, fn_name="syscall__openat")
@@ -88,8 +184,14 @@ def main():
     count = populate_whitelist(b, whitelist)
     print(f"Loaded {count} whitelist entries from {whitelist_file}")
 
-    # Pipe used to synchronise: the child waits until the parent has added
-    # its PID to the sandboxed_pids map before exec-ing bash.
+    # ---- control FIFO ----
+    cleanup_fifo()
+    os.mkfifo(CTL_FIFO)
+
+    ctl_thread = threading.Thread(target=control_loop, args=(b,), daemon=True)
+    ctl_thread.start()
+
+    # ---- fork sandboxed shell ----
     read_fd, write_fd = os.pipe()
     child_pid = os.fork()
 
@@ -107,12 +209,13 @@ def main():
         sandboxed = b.get_table("sandboxed_pids")
         sandboxed[ct.c_uint32(child_pid)] = ct.c_uint32(1)
 
-        # Let the child proceed now that its PID is tracked.
         os.write(write_fd, b"x")
         os.close(write_fd)
 
         print(f"Sandbox active for PID {child_pid} and its children")
         print(f"Access restricted to {len(whitelist)} whitelisted path prefixes")
+        print(f"Control FIFO: {CTL_FIFO}")
+        print("Use sandboxctl.py in another terminal to modify rules at runtime.")
         print("Type 'exit' to leave the sandbox.\n")
 
         try:
@@ -125,6 +228,7 @@ def main():
             except (ProcessLookupError, ChildProcessError):
                 pass
 
+        cleanup_fifo()
         print("Sandbox stopped.")
 
 
