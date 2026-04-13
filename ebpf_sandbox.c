@@ -7,6 +7,7 @@
 
 #define MAX_PATH_LEN 128
 #define MAX_DNAME_LEN 32
+#define MAX_DEPTH 4
 
 struct path_key_t {
     char path[MAX_PATH_LEN];
@@ -15,144 +16,207 @@ struct path_key_t {
 BPF_HASH(sandboxed_pids, u32, u32);
 BPF_HASH(allowed_paths, struct path_key_t, u32);
 
-static __always_inline int read_cwd(char *buf, int buf_len, char **out_start,
-                                    int *out_len) {
+/*
+ * Two scratch slots used as working buffers.  Slot 0 holds the CWD
+ * built right-to-left; slot 1 holds the final absolute path used for
+ * whitelist lookups.  Using a per-cpu map instead of the BPF stack
+ * avoids the verifier's "subtraction from stack pointer prohibited"
+ * restriction that is triggered by right-to-left pointer arithmetic.
+ */
+BPF_PERCPU_ARRAY(scratch, struct path_key_t, 2);
+
+/*
+ * Build the CWD path by walking the dentry tree right-to-left into
+ * a per-cpu map buffer.
+ *
+ * Returns 0 on success, setting *out_off to the byte index where the
+ * CWD string starts inside buf->path, and *out_len to the number of
+ * valid bytes (including any leading '/').
+ */
+static __always_inline int read_cwd(struct path_key_t *buf,
+                                    long *out_off, int *out_len) {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     struct fs_struct *fs = NULL;
     struct path pwd = {};
     struct dentry *dentry = NULL;
-    int off = buf_len;
+    long off = (long)MAX_PATH_LEN;
+
+    /*
+     * volatile write_off launders the offset before pointer arithmetic.
+     * Without it the compiler computes  buf->path + off  as
+     * (buf->path + 128) − name_len, producing a NEGATIVE unsigned
+     * variable offset on the map-value pointer.  The BPF verifier
+     * rejects any pointer whose umax_value >= BPF_MAX_VAR_OFF (2^29),
+     * and −name_len has huge unsigned value.
+     *
+     * Storing through volatile forces the compiler to treat the
+     * reloaded value as opaque, so the address becomes
+     * buf->path + write_off  (simple non-negative addition).
+     */
+    volatile long write_off;
 
     bpf_probe_read_kernel(&fs, sizeof(fs), &task->fs);
-    if (!fs) {
-        bpf_trace_printk("read_cwd: fs NULL\n");
+    if (!fs)
         return -1;
-    }
 
     bpf_probe_read_kernel(&pwd, sizeof(pwd), &fs->pwd);
     bpf_probe_read_kernel(&dentry, sizeof(dentry), &pwd.dentry);
-    if (!dentry) {
-        bpf_trace_printk("read_cwd: dentry NULL\n");
+    if (!dentry)
         return -1;
-    }
 
     #pragma unroll
     for (int i = 0; i < MAX_PATH_LEN; i++)
-        buf[i] = '\0';
+        buf->path[i] = '\0';
 
-    /*
-     * Partial dentry walk: builds a best-effort path without mount handling.
-     * Stops at the root dentry or when out of space.
-     */
     #pragma unroll
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < MAX_DEPTH; i++) {
         struct dentry *parent = NULL;
         struct qstr d_name = {};
-        int name_len = 0;
 
-        if (!dentry) {
-            bpf_trace_printk("read_cwd: dentry NULL in loop\n");
+        if (!dentry)
             break;
-        }
 
         bpf_probe_read_kernel(&parent, sizeof(parent), &dentry->d_parent);
         if (parent == dentry)
             break;
 
         bpf_probe_read_kernel(&d_name, sizeof(d_name), &dentry->d_name);
-        name_len = d_name.len;
-        if (name_len <= 0 || name_len > MAX_PATH_LEN - 1) {
-            bpf_trace_printk("read_cwd: bad name_len=%d\n", name_len);
-            break;
-        }
+
+        /* Load name_len through a helper so the compiler cannot see
+           the algebraic link  off = old_off − name_len  and cannot
+           remove the bounds checks the verifier needs. */
+        long name_len = 0;
+        bpf_probe_read_kernel(&name_len, 4, &d_name.len);
         if (name_len > MAX_DNAME_LEN)
             name_len = MAX_DNAME_LEN;
-
-        if (off <= 1 || off > MAX_PATH_LEN) {
-            bpf_trace_printk("read_cwd: bad off=%d\n", off);
+        if (name_len < 1)
             break;
-        }
-        if (off - name_len - 1 <= 0) {
-            bpf_trace_printk("read_cwd: no space off=%d name_len=%d\n", off,
-                             name_len);
+        if (off <= 1 || off > MAX_PATH_LEN)
             break;
-        }
+        if (off - name_len - 1 <= 0)
+            break;
 
         off -= name_len;
+        if (off < 0 || off >= MAX_PATH_LEN)
+            break;
+
+        long copy_len = name_len;
+        if (copy_len <= 0 || copy_len > MAX_DNAME_LEN)
+            break;
+
+        /* Read the dentry name into a fixed-size stack temp.
+           We cannot bpf_probe_read_kernel directly into the map
+           buffer at a variable offset with variable size: the
+           verifier checks max(off) + max(size) independently and
+           rejects the call even though we proved off+size ≤ 128.
+           A stack destination with a known allocation size works. */
+        char tmp[MAX_DNAME_LEN];
+        __builtin_memset(tmp, 0, sizeof(tmp));
+        bpf_probe_read_kernel(tmp, copy_len, (void *)d_name.name);
+
+        /* Launder off through volatile → compiler emits
+           map_ptr + w (addition) instead of
+           map_ptr + 128 − name_len (subtraction). */
+        write_off = off;
+        long w = write_off;
+        if (w < 0 || w >= MAX_PATH_LEN)
+            break;
+
+        /* Byte-by-byte copy from stack tmp into the map buffer.
+           Each store is 1 byte at a bounds-checked offset. */
         #pragma unroll
-        for (int k = 0; k < MAX_DNAME_LEN; k++) {
-            if (k < name_len) {
-                char c = '\0';
-                bpf_probe_read_kernel(&c, sizeof(c), (void *)(d_name.name + k));
-                if (off + k < MAX_PATH_LEN)
-                    buf[off + k] = c;
+        for (int j = 0; j < MAX_DNAME_LEN; j++) {
+            if (j < copy_len) {
+                long dest = w + (long)j;
+                if (dest >= 0 && dest < MAX_PATH_LEN)
+                    buf->path[dest] = tmp[j];
             }
         }
+
         off--;
-        buf[off] = '/';
+        if (off < 0 || off >= MAX_PATH_LEN)
+            break;
+        write_off = off;
+        w = write_off;
+        if (w < 0 || w >= MAX_PATH_LEN)
+            break;
+        char slash = '/';
+        bpf_probe_read_kernel(buf->path + w, 1, &slash);
 
         dentry = parent;
     }
 
-    if (off == buf_len) {
-        bpf_trace_printk("read_cwd: empty path\n");
+    if (off == (long)MAX_PATH_LEN)
         return -1;
-    }
+    if (off < 0 || off >= MAX_PATH_LEN)
+        return -1;
 
-    if (buf[off] != '/') {
+    char first = '\0';
+    bpf_probe_read_kernel(&first, 1, buf->path + off);
+    if (first != '/') {
         off--;
-        if (off < 0) {
-            bpf_trace_printk("read_cwd: underflow\n");
+        if (off < 0)
             return -1;
-        }
-        buf[off] = '/';
+        char slash = '/';
+        bpf_probe_read_kernel(buf->path + off, 1, &slash);
     }
 
-    *out_start = &buf[off];
-    *out_len = buf_len - off;
-    if (*out_len <= 0) {
-        bpf_trace_printk("read_cwd: out_len=%d\n", *out_len);
+    *out_off = off;
+    *out_len = (int)((long)MAX_PATH_LEN - off);
+    if (*out_len <= 0)
         return -1;
-    }
 
     return 0;
 }
 
+/*
+ * Concatenate CWD (from cwd_buf starting at byte cwd_off) with the
+ * relative path rel, writing the result into out->path.
+ * Both cwd_buf and out must be map-value pointers (not stack).
+ */
 static __always_inline int build_abs_path(const char *rel,
-                                          struct path_key_t *out_key) {
-    char *cwd = NULL;
-    int cwd_len = 0;
-    int base_len = 0;
-    int done = 0;
+                                          struct path_key_t *cwd_buf,
+                                          long cwd_off, int cwd_len,
+                                          struct path_key_t *out) {
+    long base_len = 0;
+    long done = 0;
+    long cwd_len_l = (long)cwd_len;
 
-    if (read_cwd(out_key->path, MAX_PATH_LEN, &cwd, &cwd_len) < 0)
-        return -1;
-
-    bpf_trace_printk("cwd=%s\n", cwd);
-
+    /* Copy CWD to the beginning of out->path. */
     #pragma unroll
-    for (int i = 0; i < MAX_PATH_LEN; i++) {
-        if (i < cwd_len && i < MAX_PATH_LEN - 1) {
-            out_key->path[i] = cwd[i];
+    for (long i = 0; i < MAX_PATH_LEN; i++) {
+        if (i < cwd_len_l && i < MAX_PATH_LEN - 1) {
+            long src = cwd_off + i;
+            char c = '\0';
+            if (src >= 0 && src < MAX_PATH_LEN)
+                bpf_probe_read_kernel(&c, 1, &cwd_buf->path[src]);
+            out->path[i] = c;
             base_len = i + 1;
         } else {
-            out_key->path[i] = '\0';
+            out->path[i] = '\0';
         }
     }
 
-    if (base_len > 0 && out_key->path[base_len - 1] != '/' &&
-        base_len < MAX_PATH_LEN - 1) {
-        out_key->path[base_len] = '/';
-        base_len++;
+    /* Ensure trailing slash after CWD. */
+    if (base_len > 0 && base_len < MAX_PATH_LEN - 1) {
+        long prev_idx = base_len - 1;
+        if (prev_idx >= 0 && prev_idx < MAX_PATH_LEN) {
+            char prev = out->path[prev_idx];
+            if (prev != '/') {
+                out->path[base_len] = '/';
+                base_len++;
+            }
+        }
     }
 
+    /* Append the relative path. */
     #pragma unroll
-    for (int i = 0; i < MAX_PATH_LEN; i++) {
-        int dst = base_len + i;
-        if (dst < MAX_PATH_LEN - 1) {
+    for (long i = 0; i < MAX_PATH_LEN; i++) {
+        long dst = base_len + i;
+        if (dst >= 0 && dst < MAX_PATH_LEN - 1) {
             if (!done) {
                 char c = rel[i];
-                out_key->path[dst] = c;
+                out->path[dst] = c;
                 if (c == '\0')
                     done = 1;
             }
@@ -171,61 +235,74 @@ int syscall__openat(struct pt_regs *ctx, int dfd, const char __user *filename,
         return 0;
 
     struct path_key_t rel_key = {};
-    struct path_key_t key = {};
-    bpf_probe_read_user_str(rel_key.path, sizeof(rel_key.path), (void *)filename);
+    bpf_probe_read_user_str(rel_key.path, sizeof(rel_key.path),
+                            (void *)filename);
 
-    bpf_trace_printk("dfd=%d, rel=%s\n", dfd, rel_key.path);
-
-    if (rel_key.path[0] != '/') {
-        if (dfd != AT_FDCWD) {
-            bpf_trace_printk("non-AT_FDCWD dfd not supported\n");
-            goto deny;
-        }
-        if (build_abs_path(rel_key.path, &key) < 0) {
-            bpf_trace_printk("failed to build abs path\n");
-            goto deny;
-        }
-    } else {
-        key = rel_key;
-    }
-
-    bpf_trace_printk("abs=%s\n", key.path);
-
-    if (key.path[0] != '/')
+    /* Obtain map-value scratch buffers (avoids stack-pointer
+       subtraction issues in the verifier). */
+    int zero = 0, one = 1;
+    struct path_key_t *cwd_buf = scratch.lookup(&zero);
+    struct path_key_t *key     = scratch.lookup(&one);
+    if (!cwd_buf || !key)
         goto deny;
 
-    u32 *val = allowed_paths.lookup(&key);
-    if (val)
-        return 0;
+    if (rel_key.path[0] != '/') {
+        /* Relative path — resolve against CWD. */
+        if (dfd != AT_FDCWD)
+            goto deny;
 
-    u32 len = 0;
-    #pragma unroll
-    for (u32 i = 0; i < MAX_PATH_LEN; i++) {
-        if (key.path[i] != '\0')
-            len = i + 1;
+        long cwd_off = 0;
+        int  cwd_len = 0;
+        if (read_cwd(cwd_buf, &cwd_off, &cwd_len) < 0)
+            goto deny;
+
+        if (build_abs_path(rel_key.path, cwd_buf,
+                           cwd_off, cwd_len, key) < 0)
+            goto deny;
+    } else {
+        /* Absolute path — copy into map buffer for lookups. */
+        #pragma unroll
+        for (int i = 0; i < MAX_PATH_LEN; i++)
+            key->path[i] = rel_key.path[i];
     }
 
-    /*
-     * Walk backwards through the path, zeroing one byte at a time.
-     * At each '/' boundary we check whether the resulting directory prefix
-     * exists in allowed_paths.  Because we zero from the end, the key is
-     * always properly null-padded and matches what Python inserted.
-     *
-     * The loop avoids early-exit (break/return) so that #pragma unroll
-     * can fully unroll it — necessary for kernels without bounded-loop
-     * support.
-     */
-    int allowed = 0;
+    if (key->path[0] != '/')
+        goto deny;
+
+    /* ── Exact match ── */
+    u32 *val = allowed_paths.lookup(key);
+    if (val) {
+        if (*val == 1)
+            return 0;   /* explicitly allowed */
+        goto deny;       /* explicitly denied (value 0) */
+    }
+
+    /* ── Prefix match ──
+     * Progressively truncate the path from the right.  At each '/'
+     * boundary, look the prefix up.  The first (most-specific) match
+     * wins: value 1 → allow, value 0 → deny. */
+    long len = 0;
     #pragma unroll
-    for (u32 j = 1; j < MAX_PATH_LEN; j++) {
-        if (!allowed) {
-            int i = (int)len - (int)j;
-            if (i >= 1 && i < MAX_PATH_LEN) {
-                key.path[i] = '\0';
-                if (key.path[i - 1] == '/') {
-                    u32 *pval = allowed_paths.lookup(&key);
-                    if (pval)
-                        allowed = 1;
+    for (long li = 0; li < MAX_PATH_LEN; li++) {
+        if (key->path[li] != '\0')
+            len = li + 1;
+    }
+
+    long decided = 0;
+    long allowed = 0;
+    #pragma unroll
+    for (long lj = 1; lj < MAX_PATH_LEN; lj++) {
+        if (!decided) {
+            long idx = len - lj;
+            if (idx >= 1 && idx < MAX_PATH_LEN) {
+                key->path[idx] = '\0';
+                if (key->path[idx - 1] == '/') {
+                    u32 *pval = allowed_paths.lookup(key);
+                    if (pval) {
+                        decided = 1;
+                        if (*pval == 1)
+                            allowed = 1;
+                    }
                 }
             }
         }
