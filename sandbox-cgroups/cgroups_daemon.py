@@ -13,8 +13,22 @@ bpf_pid_hash = None
 class sandbox_params(ct.Structure):
     _fields_ = [("t", ct.c_uint64)]
 
+class abstract_sandbox_param:
+    def add_to_params(self, params: sandbox_params):
+        """
+        adds this parameter to the sandbox_params
+        """
+        raise NotImplementedError()
+    
+    def is_subset_of(self, other_param) -> bool:
+        """
+        Whether this sandbox param object is a subset of the provided sandbox param object
+        """ 
+        raise NotImplementedError()
+
+
 # creates a cgroup and returns the cgroup path
-def create_cgroup(program_to_run: List[str]) -> str:
+def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
     # -d means use the callers cwd ??? i dunno actually
     # --slice=machine.slice means run the scope in the machine.slice slice (used for containers)
     # --unit=<NAME> specifies the unit name
@@ -41,7 +55,6 @@ def create_cgroup(program_to_run: List[str]) -> str:
         pid = int(read_pipe.read())
 
     # add pid to the pid hash map
-    params = sandbox_params(t = ct.c_uint64(1))
     bpf_pid_hash.items_update_batch((ct.c_uint64 * 1)(ct.c_uint64(pid)), (sandbox_params * 1)(params))
 
     # signal to child process to continue
@@ -60,7 +73,7 @@ def main():
     bpf_pid_hash = b["pid_to_params"]
     print(bpf_pid_hash)
 
-    create_cgroup(["echo", "\"100\""])
+    create_cgroup(["echo", "\"100\""], sandbox_params(t = ct.c_uint64(1)))
     b.trace_print()
 
 if __name__ == "__main__":
