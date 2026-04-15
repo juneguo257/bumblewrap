@@ -21,20 +21,32 @@ def create_cgroup(program_to_run: List[str]) -> str:
 
     unit_name = f"bumblewrap_container_{random.randint(0, 18446744073709551615)}.scope"
 
-    subprocess.Popen(["systemd-run", "--slice=machine.slice", f"--unit={unit_name}", "--scope", "python3", "cgroup_harness.py"] + program_to_run)
+    # create pipes
+    (read_fd_1, write_fd_1) = os.pipe()
+    os.set_inheritable(write_fd_1, True)
 
-    time.sleep(0.5)
+    (read_fd_2, write_fd_2) = os.pipe()
+    os.set_inheritable(read_fd_2, True)
 
-    # get pid of cgroup_harness process
-    f = open(f"/sys/fs/cgroup/machine.slice/{unit_name}/cgroup.procs", "r")
-    pid = int(f.readline())
-    f.close()
+    # run process
+    subprocess.Popen(["systemd-run", "--slice=machine.slice", f"--unit={unit_name}", "--scope", "python3", "cgroup_harness.py", f"{write_fd_1}", f"{read_fd_2}"] + program_to_run, close_fds=False)
+
+    # close unnecessary file descriptors
+    os.close(read_fd_2)
+    os.close(write_fd_1)
+
+    # recieve pid from child process
+    pid = 0
+    with os.fdopen(read_fd_1, 'r') as read_pipe:
+        pid = int(read_pipe.read())
 
     # add pid to the pid hash map
     params = sandbox_params(t = ct.c_uint64(1))
     bpf_pid_hash.items_update_batch((ct.c_uint64 * 1)(ct.c_uint64(pid)), (sandbox_params * 1)(params))
 
-
+    # signal to child process to continue
+    os.close(write_fd_2)
+    
     return f"machine.slice/{unit_name}"
 
 
