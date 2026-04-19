@@ -5,6 +5,7 @@ import os
 import subprocess
 import random
 import time
+from typing import Dict, Iterable, List
 
 SLEEP_TIME = 1
 
@@ -13,17 +14,81 @@ bpf_pid_hash = None
 class sandbox_params(ct.Structure):
     _fields_ = [("t", ct.c_uint64)]
 
-class abstract_sandbox_param:
-    def add_to_params(self, params: sandbox_params):
-        """
-        adds this parameter to the sandbox_params
-        """
+class sandbox_config:
+    """
+    Tracks allow/deny path policies similar to sandbox.py and provides
+    stubs for syncing rules into BPF maps.
+    """
+
+    def __init__(self, allow_paths: Iterable[str] | None = None, deny_paths: Iterable[str] | None = None) -> None:
+        self._path_rules: Dict[str, int] = {}
+        if allow_paths:
+            self.allow_paths(allow_paths)
+        if deny_paths:
+            self.deny_paths(deny_paths)
+
+    @staticmethod
+    def parse_whitelist(filepath: str) -> List[str]:
+        paths: List[str] = []
+        with open(filepath) as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                paths.append(line)
+        return paths
+
+    def allow_paths(self, paths: Iterable[str]) -> None:
+        for path in paths:
+            self.allow_path(path)
+
+    def deny_paths(self, paths: Iterable[str]) -> None:
+        for path in paths:
+            self.deny_path(path)
+
+    def allow_path(self, path: str) -> None:
+        for variant in self._expand_path_variants(path):
+            self._path_rules[variant] = 1
+            self._bpf_add_or_update_path(variant, 1)
+
+    def deny_path(self, path: str) -> None:
+        for variant in self._expand_path_variants(path):
+            self._path_rules[variant] = 0
+            self._bpf_add_or_update_path(variant, 0)
+
+    def remove_path(self, path: str) -> None:
+        for variant in self._expand_path_variants(path):
+            if variant in self._path_rules:
+                del self._path_rules[variant]
+            self._bpf_remove_path(variant)
+
+    def list_paths(self) -> str:
+        lines: List[str] = []
+        for path, value in self._path_rules.items():
+            tag = "ALLOW" if value == 1 else " DENY"
+            lines.append(f"  {tag}  {path}")
+        lines.sort()
+        return "\n".join(lines) if lines else "  (empty)"
+
+    def _expand_path_variants(self, path: str) -> List[str]:
+        if path.endswith("/") and len(path) > 1:
+            return [path, path.rstrip("/")]
+        return [path]
+
+    def create_sandbox_params(self) -> sandbox_params:
+        # Stub for BPF map integration.
         raise NotImplementedError()
-    
-    def is_subset_of(self, other_param) -> bool:
-        """
-        Whether this sandbox param object is a subset of the provided sandbox param object
-        """ 
+
+    def _bpf_add_or_update_path(self, path: str, value: int) -> None:
+        if self.file_list_index is None:
+            return
+        # Stub for BPF map integration.
+        raise NotImplementedError()
+
+    def _bpf_remove_path(self, path: str) -> None:
+        if self.file_list_index is None:
+            return
+        # Stub for BPF map integration.
         raise NotImplementedError()
 
 
@@ -65,7 +130,8 @@ def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
 
 def main():
     global bpf_pid_hash
-    b = BPF(src_file = "cgroups.c", cflags=["-I/usr/lib/modules/6.19.11-arch1-1/build/include"])
+    kernel_release = subprocess.check_output(["uname", "-r"]).decode().strip()
+    b = BPF(src_file = "cgroups.c", cflags=["-I/usr/lib/modules/6.19.11-arch1-1/build/include", f"-I/usr/src/linux-headers-{kernel_release}/include"])
     fnname_openat = b.get_syscall_prefix().decode() + 'openat'
     b.attach_kprobe(event=fnname_openat, fn_name="syscall__openat")
     b.attach_kprobe(event=b.get_syscall_prefix().decode() + 'execve', fn_name="syscall__execve")

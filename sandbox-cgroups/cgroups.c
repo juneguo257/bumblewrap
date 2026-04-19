@@ -2,14 +2,21 @@
 #include <uapi/linux/ptrace.h>
 #include <linux/sched.h>
 
+#define MAX_PATH_LEN 128
+
 struct sandbox_params_t {
     uint64_t t;
 };
 
-BPF_HASH(sandboxed_cgroups, uint64_t, struct sandbox_params_t);
+struct path_key_t {
+    char path[MAX_PATH_LEN];
+};
 
+BPF_HASH(sandboxed_cgroups, uint64_t, struct sandbox_params_t);
 BPF_HASH(pid_to_params, uint64_t, struct sandbox_params_t, 100);
 
+BPF_HASH(file_list, struct path_key_t, uint32_t, 200);
+BPF_HASH_OF_MAPS(file_lists, uint64_t, "file_list", 9999);
 
 // returns NULL if the cgroup is not sandboxed, otherwise will return a pointer to a the sandbox params
 static struct sandbox_params_t* get_sandbox_params_cgroup(uint64_t cgroup_id) {
