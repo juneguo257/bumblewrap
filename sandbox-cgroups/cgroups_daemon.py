@@ -195,6 +195,7 @@ def main():
     print(bpf_pid_hash)
 
     paths = sandbox_config.parse_whitelist((Path(__file__).parent.parent / "whitelist.txt").resolve())
+    paths.append(str((Path(__file__).parent / "cgroup_harness2.py").resolve()))
     config = sandbox_config(allow_paths=paths)
     params = config.create_sandbox_params(b)
     create_cgroup(["sh"], params)
