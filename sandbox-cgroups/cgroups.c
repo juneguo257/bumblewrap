@@ -17,6 +17,8 @@ BPF_HASH(pid_to_params, uint64_t, struct sandbox_params_t, 100);
 
 BPF_HASH(file_list, struct path_key_t, uint32_t, 200);
 BPF_HASH_OF_MAPS(file_lists, uint64_t, "file_list", 9999);
+BPF_HASH(pid_to_cgroups, uint64_t, uint64_t, 100);
+
 
 // returns NULL if the cgroup is not sandboxed, otherwise will return a pointer to a the sandbox params
 static struct sandbox_params_t* get_sandbox_params_cgroup(uint64_t cgroup_id) {
@@ -38,6 +40,7 @@ int syscall__execve(struct pt_regs *ctx) {
     struct sandbox_params_t* params = pid_to_params.lookup(&pid);
     if (params != NULL) {
         sandboxed_cgroups.insert(&cgid, params);
+        pid_to_cgroups.insert(&pid, &cgid);
         pid_to_params.delete(&pid);
         bpf_trace_printk("%d", bpf_get_current_cgroup_id());
     }

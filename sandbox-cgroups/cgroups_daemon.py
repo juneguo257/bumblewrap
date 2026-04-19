@@ -11,6 +11,12 @@ SLEEP_TIME = 1
 
 bpf_pid_hash = None
 
+pid_to_cgroups_hash = None
+
+cgid_map: dict[int, int] = {}
+
+curr_idx = 0
+
 class sandbox_params(ct.Structure):
     _fields_ = [("t", ct.c_uint64)]
 
@@ -94,6 +100,7 @@ class sandbox_config:
 
 # creates a cgroup and returns the cgroup path
 def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
+    global curr_idx
     # -d means use the callers cwd ??? i dunno actually
     # --slice=machine.slice means run the scope in the machine.slice slice (used for containers)
     # --unit=<NAME> specifies the unit name
@@ -107,12 +114,18 @@ def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
     (read_fd_2, write_fd_2) = os.pipe()
     os.set_inheritable(read_fd_2, True)
 
+    (read_fd_3, write_fd_3) = os.pipe()
+    os.set_inheritable(write_fd_3, True)
+
+    harness_file = os.path.dirname(os.path.abspath(__file__)) + "/cgroup_harness.py"
+
     # run process
-    subprocess.Popen(["systemd-run", "--slice=machine.slice", f"--unit={unit_name}", "--scope", "python3", "cgroup_harness.py", f"{write_fd_1}", f"{read_fd_2}"] + program_to_run, close_fds=False)
+    subprocess.Popen(["systemd-run", "--slice=machine.slice", f"--unit={unit_name}", "--scope", "python3", harness_file, f"{write_fd_1}", f"{read_fd_2}", f"{write_fd_3}"] + program_to_run, close_fds=False)
 
     # close unnecessary file descriptors
     os.close(read_fd_2)
     os.close(write_fd_1)
+    os.close(write_fd_3)
 
     # recieve pid from child process
     pid = 0
@@ -124,12 +137,26 @@ def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
 
     # signal to child process to continue
     os.close(write_fd_2)
+
+    with os.fdopen(read_fd_3, 'r') as read_pipe:
+        read_pipe.read()
+    
+    # pid -> cgroup
+    cgid = int(pid_to_cgroups_hash[ct.c_uint64(pid)].value)
+
+    cgid_map[curr_idx] = cgid
+
+    curr_idx += 1
+
+    print(cgid)
+
     
     return f"machine.slice/{unit_name}"
 
 
 def main():
     global bpf_pid_hash
+    global pid_to_cgroups_hash
     kernel_release = subprocess.check_output(["uname", "-r"]).decode().strip()
     b = BPF(src_file = "cgroups.c", cflags=["-I/usr/lib/modules/6.19.11-arch1-1/build/include", f"-I/usr/src/linux-headers-{kernel_release}/include"])
     fnname_openat = b.get_syscall_prefix().decode() + 'openat'
@@ -137,6 +164,7 @@ def main():
     b.attach_kprobe(event=b.get_syscall_prefix().decode() + 'execve', fn_name="syscall__execve")
 
     bpf_pid_hash = b["pid_to_params"]
+    pid_to_cgroups_hash = b["pid_to_cgroups"]
     print(bpf_pid_hash)
 
     create_cgroup(["echo", "\"100\""], sandbox_params(t = ct.c_uint64(1)))
