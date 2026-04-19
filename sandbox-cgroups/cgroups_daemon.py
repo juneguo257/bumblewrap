@@ -6,10 +6,12 @@ import subprocess
 import random
 import time
 from typing import Dict, Iterable, List
+from pathlib import Path
 
 SLEEP_TIME = 1
 
 bpf_pid_hash = None
+last_file_list_index = 0
 
 pid_to_cgroups_hash = None
 
@@ -18,7 +20,7 @@ cgid_map: dict[int, int] = {}
 curr_idx = 0
 
 class sandbox_params(ct.Structure):
-    _fields_ = [("t", ct.c_uint64)]
+    _fields_ = [("file_list_index", ct.c_uint64)]
 
 class sandbox_config:
     """
@@ -26,8 +28,14 @@ class sandbox_config:
     stubs for syncing rules into BPF maps.
     """
 
-    def __init__(self, allow_paths: Iterable[str] | None = None, deny_paths: Iterable[str] | None = None) -> None:
+    def __init__(
+        self,
+        allow_paths: Iterable[str] | None = None,
+        deny_paths: Iterable[str] | None = None,
+    ) -> None:
         self._path_rules: Dict[str, int] = {}
+        self.file_list_index: int | None = None
+        self.file_list_table = None
         if allow_paths:
             self.allow_paths(allow_paths)
         if deny_paths:
@@ -81,21 +89,40 @@ class sandbox_config:
             return [path, path.rstrip("/")]
         return [path]
 
-    def create_sandbox_params(self) -> sandbox_params:
-        # Stub for BPF map integration.
-        raise NotImplementedError()
+    def create_sandbox_params(self, bpf: BPF) -> sandbox_params:
+        global last_file_list_index
+        if last_file_list_index >= 16:
+            raise IndexError("oops! all file lists exhausted")
+
+        self.file_list_index = last_file_list_index
+        last_file_list_index += 1
+
+        file_lists_table = bpf.get_table("file_lists")
+
+        self.file_list_table = bpf.get_table(f"file_list{self.file_list_index}")
+        file_lists_table[ct.c_uint64(self.file_list_index)] = ct.c_int(self.file_list_table.get_fd())
+
+        for variant, rule in self._path_rules.items():
+            self._bpf_add_or_update_path(variant, rule)
+
+        return sandbox_params(file_list_index=ct.c_uint64(self.file_list_index))
 
     def _bpf_add_or_update_path(self, path: str, value: int) -> None:
-        if self.file_list_index is None:
+        if self.file_list_table is None:
             return
-        # Stub for BPF map integration.
-        raise NotImplementedError()
+        key = self.file_list_table.Key()
+        key.path = path.encode()
+        self.file_list_table[key] = ct.c_uint32(value)
 
     def _bpf_remove_path(self, path: str) -> None:
-        if self.file_list_index is None:
+        if self.file_list_table is None:
             return
-        # Stub for BPF map integration.
-        raise NotImplementedError()
+        key = self.file_list_table.Key()
+        key.path = path.encode()
+        try:
+            del self.file_list_table[key]
+        except KeyError:
+            pass
 
 
 # creates a cgroup and returns the cgroup path
@@ -167,7 +194,10 @@ def main():
     pid_to_cgroups_hash = b["pid_to_cgroups"]
     print(bpf_pid_hash)
 
-    create_cgroup(["echo", "\"100\""], sandbox_params(t = ct.c_uint64(1)))
+    paths = sandbox_config.parse_whitelist((Path(__file__).parent.parent / "whitelist.txt").resolve())
+    config = sandbox_config(allow_paths=paths)
+    params = config.create_sandbox_params(b)
+    create_cgroup(["sh"], params)
     b.trace_print()
 
 if __name__ == "__main__":

@@ -14,11 +14,24 @@ struct path_key_t {
 
 BPF_HASH(sandboxed_cgroups, uint64_t, struct sandbox_params_t);
 BPF_HASH(pid_to_params, uint64_t, struct sandbox_params_t, 100);
-
-BPF_HASH(file_list, struct path_key_t, uint32_t, 200);
-BPF_HASH_OF_MAPS(file_lists, uint64_t, "file_list", 9999);
 BPF_HASH(pid_to_cgroups, uint64_t, uint64_t, 100);
-
+BPF_HASH(file_list0, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list1, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list2, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list3, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list4, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list5, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list6, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list7, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list8, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list9, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list10, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list11, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list12, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list13, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list14, struct path_key_t, uint32_t, 200);
+BPF_HASH(file_list15, struct path_key_t, uint32_t, 200);
+BPF_HASH_OF_MAPS(file_lists, uint64_t, "file_list0", 9999);
 
 // returns NULL if the cgroup is not sandboxed, otherwise will return a pointer to a the sandbox params
 static struct sandbox_params_t* get_sandbox_params_cgroup(uint64_t cgroup_id) {
