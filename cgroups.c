@@ -93,8 +93,7 @@ static __always_inline int read_cwd(struct path_key_t *buf,
 
         bpf_probe_read_kernel(&d_name, sizeof(d_name), &dentry->d_name);
 
-        long name_len = 0;
-        bpf_probe_read_kernel(&name_len, 4, &d_name.len);
+        long name_len = (long)(unsigned int)d_name.len;
         if (name_len > MAX_DNAME_LEN)
             name_len = MAX_DNAME_LEN;
         if (name_len < 1)
@@ -145,6 +144,9 @@ static __always_inline int read_cwd(struct path_key_t *buf,
 
     if (off == (long)MAX_PATH_LEN)
         return -1;
+
+    write_off = off;
+    off = write_off;
     if (off < 0 || off >= MAX_PATH_LEN)
         return -1;
 
@@ -152,7 +154,9 @@ static __always_inline int read_cwd(struct path_key_t *buf,
     bpf_probe_read_kernel(&first, 1, buf->path + off);
     if (first != '/') {
         off--;
-        if (off < 0)
+        write_off = off;
+        off = write_off;
+        if (off < 0 || off >= MAX_PATH_LEN)
             return -1;
         char slash = '/';
         bpf_probe_read_kernel(buf->path + off, 1, &slash);
