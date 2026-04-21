@@ -2,13 +2,16 @@ import sys
 from bcc import BPF
 import ctypes as ct
 import os
+import socket
 import subprocess
 import random
+import threading
 import time
 from typing import Dict, Iterable, List
 from pathlib import Path
 
 SLEEP_TIME = 1
+SOCK_PATH = "/tmp/bumblewrap_ctl.sock" # socket for IPC
 
 bpf_pid_hash = None
 last_file_list_index = 0
@@ -18,6 +21,9 @@ pid_to_cgroups_hash = None
 cgid_map: dict[int, int] = {}
 
 curr_idx = 0
+
+containers: dict[int, dict] = {}
+containers_lock = threading.Lock()
 
 class sandbox_params(ct.Structure):
     _fields_ = [("file_list_index", ct.c_uint64)]
@@ -181,6 +187,144 @@ def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
     return f"machine.slice/{unit_name}"
 
 
+HELP_TEXT = """\
+commands:
+  containers              list active sandboxed containers
+  list <id>               list path rules for a container
+  allow <id> <path>       add allow rule
+  deny <id> <path>        add deny rule (overrides parent allow)
+  remove <id> <path>      remove a rule
+  help                    show this help"""
+
+
+def _parse_container_id(token: str) -> int:
+    return int(token)
+
+
+def _handle_command(cmd: str) -> str:
+    parts = cmd.strip().split(None, 2)
+    if not parts:
+        return "ERROR: empty command"
+
+    action = parts[0].lower()
+
+    if action in ("help", "-h", "--help"):
+        return HELP_TEXT
+
+    if action == "containers":
+        with containers_lock:
+            if not containers:
+                return "(no active containers)"
+            lines = [f"{'ID':<4} {'CGID':<22} {'PROGRAM':<20} UNIT"]
+            for cid, info in sorted(containers.items()):
+                program = " ".join(info.get("program", []))
+                lines.append(
+                    f"{cid:<4} {info['cgid']:<22} {program:<20} {info['unit_name']}"
+                )
+            return "\n".join(lines)
+
+    if action == "list":
+        if len(parts) < 2:
+            return "ERROR: usage: list <id>"
+        try:
+            cid = _parse_container_id(parts[1])
+        except ValueError:
+            return f"ERROR: invalid container id: {parts[1]}"
+        with containers_lock:
+            info = containers.get(cid)
+        if info is None:
+            return f"ERROR: container {cid} not found"
+        return f"rules for container {cid}:\n{info['config'].list_paths()}"
+
+    if action in ("allow", "deny", "remove"):
+        if len(parts) < 3:
+            return f"ERROR: usage: {action} <id> <path>"
+        try:
+            cid = _parse_container_id(parts[1])
+        except ValueError:
+            return f"ERROR: invalid container id: {parts[1]}"
+        path = parts[2].strip()
+        if not path:
+            return "ERROR: empty path"
+        with containers_lock:
+            info = containers.get(cid)
+        if info is None:
+            return f"ERROR: container {cid} not found"
+        config = info["config"]
+        if action == "allow":
+            config.allow_path(path)
+            return f"ALLOWED: {path} (container {cid})"
+        if action == "deny":
+            config.deny_path(path)
+            return f"DENIED:  {path} (container {cid})"
+        config.remove_path(path)
+        return f"REMOVED: {path} (container {cid})"
+
+    return f"ERROR: unknown command: {action!r}  (try 'help')"
+
+
+def _cleanup_socket() -> None:
+    try:
+        os.unlink(SOCK_PATH)
+    except FileNotFoundError:
+        pass
+
+
+def control_server() -> None:
+    """Accept Unix-socket connections and dispatch sandbox control commands."""
+    _cleanup_socket()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(SOCK_PATH)
+    os.chmod(SOCK_PATH, 0o666)
+    sock.listen(8)
+
+    while True:
+        try:
+            conn, _ = sock.accept()
+        except OSError:
+            break
+
+        with conn:
+            try:
+                chunks = []
+                while True:
+                    buf = conn.recv(4096)
+                    if not buf:
+                        break
+                    chunks.append(buf)
+                    if b"\n" in buf:
+                        break
+                cmd = b"".join(chunks).decode(errors="replace").strip()
+                response = _handle_command(cmd) if cmd else "ERROR: empty command"
+            except Exception as exc:
+                response = f"ERROR: {exc}"
+
+            try:
+                conn.sendall((response + "\n").encode())
+            except OSError:
+                pass
+
+
+def launch_container(b: BPF, program: List[str], baseline_paths: List[str]) -> int:
+    """Create a sandboxed cgroup running `program` and register it."""
+    config = sandbox_config(allow_paths=baseline_paths)
+    params = config.create_sandbox_params(b)
+
+    container_id = curr_idx  # snapshot before create_cgroup increments it
+    cgroup_path = create_cgroup(program, params)
+    cgid = cgid_map[container_id]
+    unit_name = cgroup_path.split("/", 1)[1] if "/" in cgroup_path else cgroup_path
+
+    with containers_lock:
+        containers[container_id] = {
+            "config": config,
+            "cgid": cgid,
+            "unit_name": unit_name,
+            "program": list(program),
+        }
+    return container_id
+
+
 def main():
     global bpf_pid_hash
     global pid_to_cgroups_hash
@@ -192,14 +336,32 @@ def main():
 
     bpf_pid_hash = b["pid_to_params"]
     pid_to_cgroups_hash = b["pid_to_cgroups"]
-    print(bpf_pid_hash)
 
-    paths = sandbox_config.parse_whitelist((Path(__file__).parent / "whitelist.txt").resolve())
-    paths.append(str((Path(__file__).parent / "cgroup_harness2.py").resolve()))
-    config = sandbox_config(allow_paths=paths)
-    params = config.create_sandbox_params(b)
-    create_cgroup(["sh"], params)
-    b.trace_print()
+    baseline = sandbox_config.parse_whitelist(
+        (Path(__file__).parent / "whitelist.txt").resolve()
+    )
+    baseline.append(str((Path(__file__).parent / "cgroup_harness2.py").resolve()))
+
+    program = sys.argv[1:] if len(sys.argv) > 1 else ["sh"]
+    cid = launch_container(b, program, baseline)
+
+    ctl_thread = threading.Thread(target=control_server, daemon=True)
+    ctl_thread.start()
+
+    info = containers[cid]
+    print(
+        f"[daemon] container {cid} running '{' '.join(program)}' "
+        f"(cgid={info['cgid']}, unit={info['unit_name']})"
+    )
+    print(f"[daemon] control socket: {SOCK_PATH}")
+    print("[daemon] run `sudo python3 cgroupctl.py ...` in another terminal to update rules")
+
+    try:
+        b.trace_print()
+    except KeyboardInterrupt:
+        print("\n[daemon] shutting down")
+    finally:
+        _cleanup_socket()
 
 if __name__ == "__main__":
     main()
