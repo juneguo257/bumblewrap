@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Dict, Iterable, List
 from pathlib import Path
+from constants import patched_syscalls
 
 SLEEP_TIME = 1
 SOCK_PATH = "/tmp/bumblewrap_ctl.sock" # socket for IPC
@@ -26,7 +27,15 @@ containers: dict[int, dict] = {}
 containers_lock = threading.Lock()
 
 class sandbox_params(ct.Structure):
-    _fields_ = [("file_list_index", ct.c_uint64)]
+    _fields_ = [
+        ("file_list_index", ct.c_uint64),
+        ("syscall_filter0", ct.c_uint64),
+        ("syscall_filter1", ct.c_uint64),
+        ("syscall_filter2", ct.c_uint64),
+        ("syscall_filter3", ct.c_uint64),
+        ("syscall_filter4", ct.c_uint64),
+        ("syscall_filter5", ct.c_uint64),
+    ]
 
 class sandbox_config:
     """
@@ -46,6 +55,7 @@ class sandbox_config:
             self.allow_paths(allow_paths)
         if deny_paths:
             self.deny_paths(deny_paths)
+        self.syscall_filter = set(patched_syscalls)
 
     @staticmethod
     def parse_whitelist(filepath: str) -> List[str]:
@@ -111,7 +121,22 @@ class sandbox_config:
         for variant, rule in self._path_rules.items():
             self._bpf_add_or_update_path(variant, rule)
 
-        return sandbox_params(file_list_index=ct.c_uint64(self.file_list_index))
+        syscall_bitsets = [0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF]
+        for i, syscall in enumerate(patched_syscalls):
+            if syscall not in self.syscall_filter:
+                bit_index = i % 64
+                array_index = i // 64
+                syscall_bitsets[array_index] &= ~(1 << bit_index)
+
+        return sandbox_params(
+            file_list_index=ct.c_uint64(self.file_list_index),
+            syscall_filter0=ct.c_uint64(syscall_bitsets[0]),
+            syscall_filter1=ct.c_uint64(syscall_bitsets[1]),
+            syscall_filter2=ct.c_uint64(syscall_bitsets[2]),
+            syscall_filter3=ct.c_uint64(syscall_bitsets[3]),
+            syscall_filter4=ct.c_uint64(syscall_bitsets[4]),
+            syscall_filter5=ct.c_uint64(syscall_bitsets[5]),
+        )
 
     def _bpf_add_or_update_path(self, path: str, value: int) -> None:
         if self.file_list_table is None:
@@ -308,6 +333,7 @@ def control_server() -> None:
 def launch_container(b: BPF, program: List[str], baseline_paths: List[str]) -> int:
     """Create a sandboxed cgroup running `program` and register it."""
     config = sandbox_config(allow_paths=baseline_paths)
+    config.syscall_filter.remove("kill")
     params = config.create_sandbox_params(b)
 
     container_id = curr_idx  # snapshot before create_cgroup increments it
@@ -329,10 +355,33 @@ def main():
     global bpf_pid_hash
     global pid_to_cgroups_hash
     kernel_release = subprocess.check_output(["uname", "-r"]).decode().strip()
-    b = BPF(src_file = "cgroups.c", cflags=["-I/usr/lib/modules/6.19.11-arch1-1/build/include", f"-I/usr/src/linux-headers-{kernel_release}/include"])
-    fnname_openat = b.get_syscall_prefix().decode() + 'openat'
-    b.attach_kprobe(event=fnname_openat, fn_name="syscall__openat")
-    b.attach_kprobe(event=b.get_syscall_prefix().decode() + 'execve', fn_name="syscall__execve")
+    with open("cgroups.c") as src_file:
+        bpf_text = src_file.read()
+    
+    for i, syscall in enumerate(patched_syscalls):
+        array_index = i // 64
+        bit_index = i % 64
+        bpf_text += "\n"
+        bpf_text += """
+            int syscall_dyn_{syscall}(struct pt_regs *ctx) {
+                struct sandbox_params_t *params = get_current_sandbox_params();
+                if (!params) return 0;
+
+                if ((params->syscall_filter{array_index} & (1ULL << {bit_index})) == 0) {
+                    bpf_trace_printk("blocked syscall {syscall}!");
+                    bpf_override_return(ctx, -EACCES);
+                }
+
+                return 0;
+            }
+        """.replace("{syscall}", syscall).replace("{array_index}", str(array_index)).replace("{bit_index}", str(bit_index))
+
+    b = BPF(text=bpf_text, cflags=["-I/usr/lib/modules/6.19.11-arch1-1/build/include", f"-I/usr/src/linux-headers-{kernel_release}/include"])
+    prefix = b.get_syscall_prefix().decode()
+    b.attach_kprobe(event=prefix + "openat", fn_name="syscall__openat")
+    b.attach_kprobe(event=prefix + 'execve', fn_name="syscall__execve")
+    for syscall in patched_syscalls:
+        b.attach_kprobe(event=prefix + syscall, fn_name=f"syscall_dyn_{syscall}")
 
     bpf_pid_hash = b["pid_to_params"]
     pid_to_cgroups_hash = b["pid_to_cgroups"]

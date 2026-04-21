@@ -11,6 +11,12 @@
 
 struct sandbox_params_t {
     uint64_t file_list_index;
+    uint64_t syscall_filter0;
+    uint64_t syscall_filter1;
+    uint64_t syscall_filter2;
+    uint64_t syscall_filter3;
+    uint64_t syscall_filter4;
+    uint64_t syscall_filter5;
 };
 
 struct path_key_t {
