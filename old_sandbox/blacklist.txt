@@ -1,2 +1,0 @@
-/tmp/secret2.txt, 1
-/tmp/ultra_secret.txt, 2
