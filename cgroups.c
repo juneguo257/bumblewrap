@@ -126,7 +126,6 @@ static __always_inline int read_cwd(struct path_key_t *buf,
         if (w < 0 || w >= MAX_PATH_LEN)
             break;
 
-        #pragma unroll
         for (int j = 0; j < MAX_DNAME_LEN; j++) {
             if (j < copy_len) {
                 long dest = w + (long)j;
