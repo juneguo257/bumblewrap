@@ -7,7 +7,7 @@ import subprocess
 import random
 import threading
 import time
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Tuple
 from pathlib import Path
 from constants import patched_syscalls, bumblewrap_socket_path as SOCK_PATH
 
@@ -156,7 +156,7 @@ class sandbox_config:
 
 
 # creates a cgroup and returns the cgroup path
-def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
+def create_cgroup(program_to_run: List[str], params: sandbox_params) -> Tuple[str, str]:
     global curr_idx
     # -d means use the callers cwd ??? i dunno actually
     # --slice=machine.slice means run the scope in the machine.slice slice (used for containers)
@@ -192,6 +192,9 @@ def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
     # add pid to the pid hash map
     bpf_pid_hash.items_update_batch((ct.c_uint64 * 1)(ct.c_uint64(pid)), (sandbox_params * 1)(params))
 
+    with open(f"/proc/{pid}/cgroup") as f:
+        cgroup_fs = "/sys/fs/cgroup" + f.read().strip().splitlines()[0].split(":", 2)[2]
+
     # signal to child process to continue
     os.close(write_fd_2)
 
@@ -208,7 +211,7 @@ def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
     print(cgid)
 
     
-    return f"machine.slice/{unit_name}"
+    return f"machine.slice/{unit_name}", cgroup_fs
 
 
 HELP_TEXT = """\
@@ -390,7 +393,7 @@ def main():
     )
     baseline.append(str((Path(__file__).parent / "cgroup_harness2.py").resolve()))
 
-    program = sys.argv[1:] if len(sys.argv) > 1 else ["sh"]
+    program = sys.argv[1:] if len(sys.argv) > 1 else ["/usr/bin/sleep", "infinity"]
     cid = launch_container(b, program, baseline)
 
     ctl_thread = threading.Thread(target=control_server, daemon=True)
