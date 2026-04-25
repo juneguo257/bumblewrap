@@ -1,3 +1,5 @@
+bumblewrap_socket_path = "/run/bumblewrap.sock"
+
 patched_syscalls = [
     "read",
     "write",

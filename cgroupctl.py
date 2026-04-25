@@ -17,8 +17,8 @@ Usage:
 import argparse
 import socket
 import sys
+from constants import bumblewrap_socket_path as SOCK_PATH
 
-SOCK_PATH = "/tmp/bumblewrap_ctl.sock"
 RECV_TIMEOUT = 5.0
 
 

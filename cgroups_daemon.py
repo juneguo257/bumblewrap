@@ -9,10 +9,9 @@ import threading
 import time
 from typing import Dict, Iterable, List
 from pathlib import Path
-from constants import patched_syscalls
+from constants import patched_syscalls, bumblewrap_socket_path as SOCK_PATH
 
 SLEEP_TIME = 1
-SOCK_PATH = "/tmp/bumblewrap_ctl.sock" # socket for IPC
 
 bpf_pid_hash = None
 last_file_list_index = 0
