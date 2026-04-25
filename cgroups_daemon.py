@@ -380,7 +380,10 @@ def main():
     b.attach_kprobe(event=prefix + "openat", fn_name="syscall__openat")
     b.attach_kprobe(event=prefix + 'execve', fn_name="syscall__execve")
     for syscall in patched_syscalls:
-        b.attach_kprobe(event=prefix + syscall, fn_name=f"syscall_dyn_{syscall}")
+        try:
+            b.attach_kprobe(event=prefix + syscall, fn_name=f"syscall_dyn_{syscall}")
+        except Exception:
+            print(f"[warn] skipping unavailable syscall: {syscall}")
 
     bpf_pid_hash = b["pid_to_params"]
     pid_to_cgroups_hash = b["pid_to_cgroups"]
