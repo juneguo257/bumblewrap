@@ -407,7 +407,7 @@ def control_server() -> None:
 def launch_container(b: BPF, program: List[str], baseline_paths: List[str]) -> int:
     """Create a sandboxed cgroup running `program` and register it."""
     config = sandbox_config(allow_paths=baseline_paths)
-    config.syscall_filter.difference_update(["rename", "renameat", "renameat2", "symlink", "symlinkat", "link", "linkat"])
+    config.syscall_filter.difference_update(["kill", "rename", "renameat", "renameat2", "symlink", "symlinkat", "link", "linkat"])
 
     container_id = curr_idx  # snapshot before create_cgroup increments it
     cgroup_path = create_cgroup(b, program, config)
