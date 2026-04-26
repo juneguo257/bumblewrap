@@ -481,7 +481,6 @@ def main():
         f"(cgid={info['cgid']}, unit={info['unit_name']})"
     )
     print(f"[daemon] control socket: {SOCK_PATH}")
-    print("[daemon] run `sudo python3 cgroupctl.py ...` in another terminal to update rules")
 
     try:
         b.trace_print()
