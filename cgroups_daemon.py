@@ -7,7 +7,7 @@ import subprocess
 import random
 import threading
 import time
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 from pathlib import Path
 from constants import patched_syscalls, bumblewrap_socket_path as SOCK_PATH
 
@@ -48,6 +48,7 @@ class sandbox_config:
         deny_paths: Iterable[str] | None = None,
     ) -> None:
         self._path_rules: Dict[str, int] = {}
+        self._bpf = None
         self.file_list_index: int | None = None
         self.file_list_table = None
         if allow_paths:
@@ -104,7 +105,7 @@ class sandbox_config:
             return [path, path.rstrip("/")]
         return [path]
 
-    def create_sandbox_params(self, bpf: BPF) -> sandbox_params:
+    def _setup_file_list(self, bpf: BPF):
         global last_file_list_index
         if last_file_list_index >= 16:
             raise IndexError("oops! all file lists exhausted")
@@ -120,6 +121,7 @@ class sandbox_config:
         for variant, rule in self._path_rules.items():
             self._bpf_add_or_update_path(variant, rule)
 
+    def _create_params(self) -> sandbox_params:
         syscall_bitsets = [0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF]
         for i, syscall in enumerate(patched_syscalls):
             if syscall not in self.syscall_filter:
@@ -137,6 +139,17 @@ class sandbox_config:
             syscall_filter5=ct.c_uint64(syscall_bitsets[5]),
         )
 
+    def install(self, bpf: BPF, pid: int) -> None:
+        self._setup_file_list(bpf)
+
+        global bpf_pid_hash        
+        bpf_pid_hash[ct.c_uint64(pid)] = self._create_params()
+
+        self._bpf = bpf
+        
+    def update(self, cgid: int) -> None:
+        self._bpf["sandboxed_cgroups"][ct.c_uint64(cgid)] = self._create_params()
+
     def _bpf_add_or_update_path(self, path: str, value: int) -> None:
         if self.file_list_table is None:
             return
@@ -153,10 +166,22 @@ class sandbox_config:
             del self.file_list_table[key]
         except KeyError:
             pass
+    
+    def allow_syscall(self, syscall: str) -> None:
+        if syscall in patched_syscalls:
+            self.syscall_filter.add(syscall)
+        else:
+            raise ValueError(f"syscall {syscall} is not in the patched syscall list")
+    
+    def deny_syscall(self, syscall: str) -> None:
+        if syscall in patched_syscalls:
+            self.syscall_filter.discard(syscall)
+        else:
+            raise ValueError(f"syscall {syscall} is not in the patched syscall list")
 
 
 # creates a cgroup and returns the cgroup path
-def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
+def create_cgroup(b: BPF, program_to_run: List[str], config: sandbox_config) -> str:
     global curr_idx
     # -d means use the callers cwd ??? i dunno actually
     # --slice=machine.slice means run the scope in the machine.slice slice (used for containers)
@@ -190,7 +215,7 @@ def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
         pid = int(read_pipe.read())
 
     # add pid to the pid hash map
-    bpf_pid_hash.items_update_batch((ct.c_uint64 * 1)(ct.c_uint64(pid)), (sandbox_params * 1)(params))
+    config.install(b, pid)
 
     # signal to child process to continue
     os.close(write_fd_2)
@@ -213,12 +238,15 @@ def create_cgroup(program_to_run: List[str], params: sandbox_params) -> str:
 
 HELP_TEXT = """\
 commands:
-  containers              list active sandboxed containers
-  list <id>               list path rules for a container
-  allow <id> <path>       add allow rule
-  deny <id> <path>        add deny rule (overrides parent allow)
-  remove <id> <path>      remove a rule
-  help                    show this help"""
+  containers                      list active sandboxed containers
+  list <id>                       list path rules for a container
+  allow <id> <path>               add allow rule
+  deny <id> <path>                add deny rule (overrides parent allow)
+  remove <id> <path>              remove a rule
+  syscall allow <id> <syscall>    allow a syscall
+  syscall deny <id> <syscall>     deny a syscall
+  syscall list <id>               list allowed syscalls for a container
+  help                            show this help"""
 
 
 def _parse_container_id(token: str) -> int:
@@ -284,6 +312,53 @@ def _handle_command(cmd: str) -> str:
         config.remove_path(path)
         return f"REMOVED: {path} (container {cid})"
 
+    if action == "syscall":
+        parts = cmd.strip().split(None, 3)
+        subaction = parts[1].lower() if len(parts) > 1 else ""
+        if subaction not in ("allow", "deny", "list") or len(parts) < 3:
+            return "ERROR: usage: syscall <allow|deny|list> <id> [syscall]"
+        try:
+            cid = _parse_container_id(parts[2])
+        except ValueError:
+            return f"ERROR: invalid container id: {parts[2]}"
+        with containers_lock:
+            info = containers.get(cid)
+        if info is None:
+            return f"ERROR: container {cid} not found"
+        config = info["config"]
+        if subaction == "list":
+            if len(parts) < 3:
+                return "ERROR: usage: syscall list <id>"
+            try:
+                cid = _parse_container_id(parts[2])
+            except ValueError:
+                return f"ERROR: invalid container id: {parts[2]}"
+            with containers_lock:
+                info = containers.get(cid)
+            if info is None:
+                return f"ERROR: container {cid} not found"
+            config = info["config"]
+            allowed_syscalls = sorted(config.syscall_filter)
+            if not allowed_syscalls:
+                return f"(no allowed syscalls for container {cid})"
+            return f"allowed syscalls for container {cid}:\n  " + "\n  ".join(allowed_syscalls)
+        if len(parts) < 4:
+            return f"ERROR: usage: syscall {subaction} <id> <syscall>"
+        syscall = parts[3].strip()
+        if not syscall:
+            return "ERROR: empty syscall"
+        try:
+            if subaction == "allow":
+                config.allow_syscall(syscall)
+                config.update(info["cgid"])
+                return f"ALLOWED: {syscall} (container {cid})"
+            else:
+                config.deny_syscall(syscall)
+                config.update(info["cgid"])
+                return f"DENIED:  {syscall} (container {cid})"
+        except ValueError as exc:
+            return f"ERROR: {exc}"
+
     return f"ERROR: unknown command: {action!r}  (try 'help')"
 
 
@@ -332,11 +407,10 @@ def control_server() -> None:
 def launch_container(b: BPF, program: List[str], baseline_paths: List[str]) -> int:
     """Create a sandboxed cgroup running `program` and register it."""
     config = sandbox_config(allow_paths=baseline_paths)
-    config.syscall_filter.remove("kill")
-    params = config.create_sandbox_params(b)
+    config.syscall_filter.difference_update(["rename", "renameat", "renameat2", "symlink", "symlinkat", "link", "linkat"])
 
     container_id = curr_idx  # snapshot before create_cgroup increments it
-    cgroup_path = create_cgroup(program, params)
+    cgroup_path = create_cgroup(b, program, config)
     cgid = cgid_map[container_id]
     unit_name = cgroup_path.split("/", 1)[1] if "/" in cgroup_path else cgroup_path
 
