@@ -10,6 +10,9 @@ Usage:
     sudo ./bumblewrapctl.py allow  /home/user/project/
     sudo ./bumblewrapctl.py deny   /etc/shadow
     sudo ./bumblewrapctl.py remove /home/user/project/
+    sudo ./bumblewrapctl.py syscall list
+    sudo ./bumblewrapctl.py syscall allow kill
+    sudo ./bumblewrapctl.py syscall deny kill
     sudo ./bumblewrapctl.py --id 1 list
 
 `--id` defaults to 0 (the initial container spawned by the daemon).
@@ -74,6 +77,15 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         s = sub.add_parser(name, help=desc)
         s.add_argument("path", help="path to apply the rule to")
+    
+    sub_sys = sub.add_parser("syscall", help="manage syscall rules").add_subparsers(dest="syscall_action", required=True)
+    sub_sys.add_parser("list", help="list syscall rules for a container")
+    for name, desc in (
+        ("allow", "whitelist a syscall (make it accessible)"),
+        ("deny", "blacklist a syscall (overrides parent allow)"),
+    ):
+        s = sub_sys.add_parser(name, help=desc)
+        s.add_argument("syscall", help="syscall to apply the rule to")
 
     return p
 
@@ -85,6 +97,11 @@ def main() -> None:
         cmd = "containers"
     elif args.action == "list":
         cmd = f"list {args.container_id}"
+    elif args.action == "syscall":
+        if args.syscall_action == "list":
+            cmd = f"syscall list {args.container_id}"
+        else:
+            cmd = f"syscall {args.syscall_action} {args.container_id} {args.syscall}"
     else:
         cmd = f"{args.action} {args.container_id} {args.path}"
 
