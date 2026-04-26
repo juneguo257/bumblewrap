@@ -1,3 +1,5 @@
+#! /usr/bin/env python3
+
 import sys
 from bcc import BPF
 import ctypes as ct
@@ -199,7 +201,7 @@ def create_cgroup(b: BPF, program_to_run: List[str], config: sandbox_config) -> 
     (read_fd_3, write_fd_3) = os.pipe()
     os.set_inheritable(write_fd_3, True)
 
-    harness_file = os.path.dirname(os.path.abspath(__file__)) + "/cgroup_harness.py"
+    harness_file = os.path.dirname(os.path.abspath(__file__)) + "/harness/stage1.py"
 
     # run process
     subprocess.Popen(["systemd-run", "--slice=machine.slice", f"--unit={unit_name}", "--scope", "python3", harness_file, f"{write_fd_1}", f"{read_fd_2}", f"{write_fd_3}"] + program_to_run, close_fds=False)
@@ -428,7 +430,7 @@ def main():
     global bpf_pid_hash
     global pid_to_cgroups_hash
     kernel_release = subprocess.check_output(["uname", "-r"]).decode().strip()
-    with open("cgroups.c") as src_file:
+    with open("bpf/sandbox.c") as src_file:
         bpf_text = src_file.read()
     
     for i, syscall in enumerate(patched_syscalls):
@@ -465,7 +467,7 @@ def main():
     baseline = sandbox_config.parse_whitelist(
         (Path(__file__).parent / "whitelist.txt").resolve()
     )
-    baseline.append(str((Path(__file__).parent / "cgroup_harness2.py").resolve()))
+    baseline.append(str((Path(__file__).parent / "harness/stage2.py").resolve()))
 
     program = sys.argv[1:] if len(sys.argv) > 1 else ["sh"]
     cid = launch_container(b, program, baseline)

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Control client for a running cgroups_daemon.py.
+"""Control client for a running bumblewrap.py.
 
 Connects to the daemon's Unix socket and sends commands to dynamically
 modify sandbox path rules while the sandboxed shell is still running.
 
 Usage:
-    sudo python3 cgroupctl.py containers
-    sudo python3 cgroupctl.py list
-    sudo python3 cgroupctl.py allow  /home/user/project/
-    sudo python3 cgroupctl.py deny   /etc/shadow
-    sudo python3 cgroupctl.py remove /home/user/project/
-    sudo python3 cgroupctl.py --id 1 list
+    sudo ./bumblewrapctl.py containers
+    sudo ./bumblewrapctl.py list
+    sudo ./bumblewrapctl.py allow  /home/user/project/
+    sudo ./bumblewrapctl.py deny   /etc/shadow
+    sudo ./bumblewrapctl.py remove /home/user/project/
+    sudo ./bumblewrapctl.py --id 1 list
 
 `--id` defaults to 0 (the initial container spawned by the daemon).
 """

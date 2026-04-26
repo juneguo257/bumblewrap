@@ -13,6 +13,6 @@ with os.fdopen(int(sys.argv[2]), 'r') as read_pipe:
 # start process
 starting_arg = 3
 
-harness_two = os.path.dirname(os.path.abspath(__file__)) + "/cgroup_harness2.py"
+harness_two = os.path.dirname(os.path.abspath(__file__)) + "/stage2.py"
 
 os.execvp("python3", ["python3", harness_two] + sys.argv[starting_arg:])
