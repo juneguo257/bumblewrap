@@ -1,2 +1,5 @@
 include
 __pycache__
+bumblewrapsh
+*.iso
+*.out
