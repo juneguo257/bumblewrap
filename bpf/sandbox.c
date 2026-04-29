@@ -7,7 +7,7 @@
 
 #define MAX_PATH_LEN 128
 #define MAX_DNAME_LEN 32
-#define MAX_DEPTH 4
+#define MAX_DEPTH 8
 
 struct sandbox_params_t {
     uint64_t file_list_index;
