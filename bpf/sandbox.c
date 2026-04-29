@@ -302,6 +302,14 @@ int syscall__openat(struct pt_regs *ctx, int dfd, const char __user *filename, i
     for (long lj = 1; lj < MAX_PATH_LEN; lj++) {
         if (!decided) {
             long idx = len - lj;
+            if (idx >= 4 && idx < MAX_PATH_LEN) {
+                if (key->path[idx - 3] == '.' &&
+                    key->path[idx - 2] == '.' &&
+                    key->path[idx - 1] == '/') {
+                    goto deny;
+                }
+            }
+
             if (idx >= 1 && idx < MAX_PATH_LEN) {
                 key->path[idx] = '\0';
                 if (key->path[idx - 1] == '/') {
