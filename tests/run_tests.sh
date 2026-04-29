@@ -52,7 +52,7 @@ echo ""
 echo "Setting up daemon (BPF compilation may take a moment) ..."
 
 cd "$PROJECT_DIR"
-python3 cgroups_daemon.py bash "$TEST_STAGING/run_all.sh" > /dev/null 2>&1 &
+python3 bumblewrap.py bash "$TEST_STAGING/run_all.sh" > /dev/null 2>&1 &
 DAEMON_PID=$!
 
 # Wait for the DONE marker (timeout 120s — BPF compilation can be slow)
