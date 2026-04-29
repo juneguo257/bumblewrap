@@ -4,7 +4,7 @@
 #include <linux/sched.h>
 #include <linux/path.h>
 #include <linux/fcntl.h>
-#include <linux/fs.h>
+#include "bpf/fs.h"
 
 #define MAX_PATH_LEN 96
 #define MAX_DNAME_LEN 32
