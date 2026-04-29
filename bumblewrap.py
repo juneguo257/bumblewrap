@@ -450,7 +450,7 @@ def main():
 
     b = BPF(text=bpf_text, cflags=["-I/usr/lib/modules/6.19.11-arch1-1/build/include", f"-I/usr/src/linux-headers-{kernel_release}/include"])
     prefix = b.get_syscall_prefix().decode()
-    b.attach_kprobe(event=prefix + "openat", fn_name="syscall__openat")
+    # b.attach_kprobe(event=prefix + "openat", fn_name="syscall__openat")
     b.attach_kprobe(event=prefix + 'execve', fn_name="syscall__execve")
     for syscall in patched_syscalls:
         try:
@@ -477,6 +477,7 @@ def main():
     )
     print(f"[daemon] control socket: {SOCK_PATH}")
 
+    # b.trace_print()
     try:
         control_server()
     except KeyboardInterrupt:

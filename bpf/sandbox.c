@@ -4,6 +4,7 @@
 #include <linux/sched.h>
 #include <linux/path.h>
 #include <linux/fcntl.h>
+#include <linux/fs.h>
 
 #define MAX_PATH_LEN 96
 #define MAX_DNAME_LEN 32
@@ -326,4 +327,80 @@ int syscall__openat(struct pt_regs *ctx, int dfd, const char __user *filename, i
 deny:
     bpf_override_return(ctx, -EACCES);
     return 0;
+}
+
+
+LSM_PROBE(file_open, struct file* file) {
+    // check if should sandbox
+    struct sandbox_params_t *params = get_current_sandbox_params();
+    if (!params)
+        return 0;
+
+    bpf_trace_printk("IN LSM!");
+
+
+    void *file_list = get_file_list_map(params->file_list_index);
+    if (!file_list) {
+        return 0;
+    }
+
+
+    bpf_trace_printk("%d is BLOCKED!", bpf_get_current_cgroup_id());
+
+
+
+    int zero = 0;
+    struct path_key_t* key = scratch.lookup(&zero);
+
+    bpf_d_path((struct path*)&(file->f_path), (char*)key->path, MAX_PATH_LEN);
+
+
+    u32* val = bpf_map_lookup_elem(file_list, key);
+
+    if (val != NULL && *val == 0) {
+        return -EPERM;
+    }
+
+    // walk back code
+    if (val) {
+        if (*val == 1)
+            return 0;
+        return -EPERM;
+    }
+
+    long len = 0;
+    #pragma unroll
+    for (long li = 0; li < MAX_PATH_LEN; li++) {
+        if (key->path[li] != '\0')
+            len = li + 1;
+    }
+
+    long decided = 0;
+    long allowed = 0;
+    #pragma unroll
+    for (long lj = 1; lj < MAX_PATH_LEN; lj++) {
+        if (!decided) {
+            long idx = len - lj;
+
+            if (idx >= 1 && idx < MAX_PATH_LEN) {
+                // if (key->path[idx] == '.' && key->path[idx - 1] == '.') {
+                //     goto deny;
+                // }
+
+                key->path[idx] = '\0';
+                if (key->path[idx - 1] == '/') {
+                    u32 *pval = bpf_map_lookup_elem(file_list, key);
+                    if (pval) {
+                        decided = 1;
+                        if (*pval == 1)
+                            allowed = 1;
+                    }
+                }
+            }
+        }
+    }
+    if (allowed)
+        return 0;
+
+    return -EPERM;
 }
