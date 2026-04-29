@@ -448,7 +448,8 @@ def main():
             }
         """.replace("{syscall}", syscall).replace("{array_index}", str(array_index)).replace("{bit_index}", str(bit_index))
 
-    b = BPF(text=bpf_text, cflags=["-I/usr/lib/modules/6.19.11-arch1-1/build/include", f"-I/usr/src/linux-headers-{kernel_release}/include"])
+    bpf_dir = str((Path(__file__).resolve().parent / "bpf").resolve())
+    b = BPF(text=bpf_text, cflags=["-I/usr/lib/modules/6.19.11-arch1-1/build/include", f"-I/usr/src/linux-headers-{kernel_release}/include", f"-I{bpf_dir}"])
     prefix = b.get_syscall_prefix().decode()
     # b.attach_kprobe(event=prefix + "openat", fn_name="syscall__openat")
     b.attach_kprobe(event=prefix + 'execve', fn_name="syscall__execve")
