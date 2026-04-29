@@ -374,7 +374,7 @@ def control_server() -> None:
     if not os.path.exists(bumblewrap_dir):
         os.makedirs(bumblewrap_dir, exist_ok=True)
     sock.bind(SOCK_PATH)
-    os.chmod(SOCK_PATH, 0o666)
+    os.chmod(SOCK_PATH, 0o600)
     sock.listen(8)
 
     while True:
@@ -406,7 +406,7 @@ def control_server() -> None:
 
 def launch_container(b: BPF, program: List[str], baseline_paths: List[str]) -> int:
     """Create a sandboxed cgroup running `program` and register it."""
-    config = sandbox_config(allow_paths=baseline_paths)
+    config = sandbox_config(allow_paths=baseline_paths, deny_paths=[bumblewrap_dir])
     config.syscall_filter.difference_update(["kill", "rename", "renameat", "renameat2", "symlink", "symlinkat", "link", "linkat"])
 
     container_id = curr_idx  # snapshot before create_cgroup increments it
