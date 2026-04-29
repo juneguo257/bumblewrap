@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = git
+
+[Action]
+Description = Cloning bumblewrap...
+When = PostTransaction
+Depends = git
+Exec = /usr/local/bin/clone-bumblewrap.sh

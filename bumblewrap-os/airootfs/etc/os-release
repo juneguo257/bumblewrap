@@ -1,0 +1,10 @@
+NAME="Bumblewrap OS"
+PRETTY_NAME="Bumblewrap OS"
+ID=bumblewrap-os
+BUILD_ID=rolling
+ANSI_COLOR="38;2;23;147;209"
+HOME_URL="https://github.com/juneguo257/bumblewrap"
+DOCUMENTATION_URL="https://github.com/juneguo257/bumblewrap"
+SUPPORT_URL="https://github.com/juneguo257/bumblewrap"
+BUG_REPORT_URL="https://gitlab.archlinux.org/groups/archlinux/-/issues"
+PRIVACY_POLICY_URL="https://terms.archlinux.org/docs/privacy-policy/"
