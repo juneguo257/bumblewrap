@@ -345,7 +345,7 @@ LSM_PROBE(file_open, struct file* file) {
     }
 
 
-    bpf_trace_printk("%d is BLOCKED!", bpf_get_current_cgroup_id());
+    bpf_trace_printk("%d has params!", bpf_get_current_cgroup_id());
 
 
 
@@ -354,25 +354,30 @@ LSM_PROBE(file_open, struct file* file) {
 
     bpf_d_path((struct path*)&(file->f_path), (char*)key->path, MAX_PATH_LEN);
 
+    bpf_trace_printk("%s", key->path);
+
+
+    // walk back code
+
+    long len = 0;
+    int done = 0;
+    #pragma unroll
+    for (long li = 0; li < MAX_PATH_LEN; li++) {
+        if (!done && key->path[li] != '\0') {
+            len = li + 1;
+        } else {
+            done = 1;
+            key->path[li] = '\0';
+        }
+    }
 
     u32* val = bpf_map_lookup_elem(file_list, key);
 
-    if (val != NULL && *val == 0) {
-        return -EPERM;
-    }
-
-    // walk back code
     if (val) {
-        if (*val == 1)
+        if (*val == 1) {
             return 0;
+        }
         return -EPERM;
-    }
-
-    long len = 0;
-    #pragma unroll
-    for (long li = 0; li < MAX_PATH_LEN; li++) {
-        if (key->path[li] != '\0')
-            len = li + 1;
     }
 
     long decided = 0;
@@ -399,8 +404,10 @@ LSM_PROBE(file_open, struct file* file) {
             }
         }
     }
-    if (allowed)
+    if (allowed) {
+        bpf_trace_printk("ALLOWED!  YIPEE");
         return 0;
+    }
 
     return -EPERM;
 }
