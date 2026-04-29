@@ -26,6 +26,8 @@ curr_idx = 0
 
 containers: dict[int, dict] = {}
 
+quiet = os.environ.get("BUMBLEWRAP_QUIET", "0") == "1"
+
 class sandbox_params(ct.Structure):
     _fields_ = [
         ("file_list_index", ct.c_uint64),
@@ -454,7 +456,8 @@ def main():
         try:
             b.attach_kprobe(event=prefix + syscall, fn_name=f"syscall_dyn_{syscall}")
         except Exception:
-            print(f"[warn] skipping unavailable syscall: {syscall}")
+            if not quiet:
+                print(f"[warn] skipping unavailable syscall: {syscall}")
 
     bpf_pid_hash = b["pid_to_params"]
     pid_to_cgroups_hash = b["pid_to_cgroups"]
