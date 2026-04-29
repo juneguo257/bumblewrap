@@ -7,15 +7,16 @@ import os
 import socket
 import subprocess
 import random
-import time
 from typing import Dict, Iterable, List, Optional
 from pathlib import Path
-from constants import patched_syscalls, bumblewrap_socket_path as SOCK_PATH
+from constants import patched_syscalls, bumblewrap_dir
 
 SLEEP_TIME = 1
 
 bpf_pid_hash = None
 last_file_list_index = 0
+instance_id = hex(random.randint(0x000000, 0xFFFFFF))[2:]
+SOCK_PATH = f"{bumblewrap_dir}/{instance_id}.sock"
 
 pid_to_cgroups_hash = None
 
@@ -187,7 +188,7 @@ def create_cgroup(b: BPF, program_to_run: List[str], config: sandbox_config) -> 
     # --slice=machine.slice means run the scope in the machine.slice slice (used for containers)
     # --unit=<NAME> specifies the unit name
 
-    unit_name = f"bumblewrap_container_{random.randint(0, 18446744073709551615)}.scope"
+    unit_name = f"bumblewrap_container_{instance_id}_{random.randint(0, 16777216)}.scope"
 
     # create pipes
     (read_fd_1, write_fd_1) = os.pipe()
@@ -368,6 +369,8 @@ def control_server() -> None:
     """Accept Unix-socket connections and dispatch sandbox control commands."""
     _cleanup_socket()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if not os.path.exists(bumblewrap_dir):
+        os.makedirs(bumblewrap_dir, exist_ok=True)
     sock.bind(SOCK_PATH)
     os.chmod(SOCK_PATH, 0o666)
     sock.listen(8)

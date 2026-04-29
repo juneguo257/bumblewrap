@@ -1,4 +1,4 @@
-bumblewrap_socket_path = "/run/bumblewrap.sock"
+bumblewrap_dir = "/run/bumblewrap"
 
 patched_syscalls = [
     "read",

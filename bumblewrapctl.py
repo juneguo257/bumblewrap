@@ -13,26 +13,28 @@ Usage:
     sudo ./bumblewrapctl.py syscall list
     sudo ./bumblewrapctl.py syscall allow kill
     sudo ./bumblewrapctl.py syscall deny kill
-    sudo ./bumblewrapctl.py --id 1 list
+    sudo ./bumblewrapctl.py --socket /run/bumblewrap/123456.sock --id 1 list
 
+`--socket` specifies which socket to connect to. If none is specified, it will connect to the running bumblewrap session if there is only one.
 `--id` defaults to 0 (the initial container spawned by the daemon).
 """
 import argparse
 import socket
 import sys
-from constants import bumblewrap_socket_path as SOCK_PATH
+import os
+from constants import bumblewrap_dir
 
 RECV_TIMEOUT = 5.0
 
 
-def send_command(cmd: str) -> str:
+def send_command(socket_path: str, cmd: str) -> str:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(RECV_TIMEOUT)
     try:
-        sock.connect(SOCK_PATH)
+        sock.connect(socket_path)
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         print(
-            f"error: could not connect to daemon at {SOCK_PATH}: {exc}",
+            f"error: could not connect to daemon at {socket_path}: {exc}",
             file=sys.stderr,
         )
         print("is cgroups_daemon.py running?", file=sys.stderr)
@@ -65,6 +67,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="container_id",
         help="container id to operate on (default: 0)",
     )
+
+    p.add_argument(
+        "--socket", "-s",
+        type=str,
+        dest="socket_path",
+        help=f"path to a bumblewrap control socket",
+    )
+
     sub = p.add_subparsers(dest="action", required=True)
 
     sub.add_parser("containers", help="list all active sandboxed containers")
@@ -93,6 +103,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
+    socket_path = args.socket_path
+    if socket_path is None:
+        candidates = [os.path.join(bumblewrap_dir, f) for f in os.listdir(bumblewrap_dir) if f.endswith(".sock")]
+        if len(candidates) == 1:
+            socket_path = candidates[0]
+        elif len(candidates) == 0:
+            print(f"error: no running bumblewrap sessions found in {bumblewrap_dir}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"error: multiple running bumblewrap sessions found in {bumblewrap_dir}, please specify with --socket:", file=sys.stderr)
+            for c in candidates:
+                print(f"  {c}", file=sys.stderr)
+            sys.exit(1)
+
     if args.action == "containers":
         cmd = "containers"
     elif args.action == "list":
@@ -105,7 +129,7 @@ def main() -> None:
     else:
         cmd = f"{args.action} {args.container_id} {args.path}"
 
-    response = send_command(cmd)
+    response = send_command(socket_path, cmd)
     sys.stdout.write(response)
     if not response.endswith("\n"):
         sys.stdout.write("\n")
