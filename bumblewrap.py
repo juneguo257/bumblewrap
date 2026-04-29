@@ -7,7 +7,6 @@ import os
 import socket
 import subprocess
 import random
-import threading
 import time
 from typing import Dict, Iterable, List, Optional
 from pathlib import Path
@@ -25,7 +24,6 @@ cgid_map: dict[int, int] = {}
 curr_idx = 0
 
 containers: dict[int, dict] = {}
-containers_lock = threading.Lock()
 
 class sandbox_params(ct.Structure):
     _fields_ = [
@@ -266,16 +264,15 @@ def _handle_command(cmd: str) -> str:
         return HELP_TEXT
 
     if action == "containers":
-        with containers_lock:
-            if not containers:
-                return "(no active containers)"
-            lines = [f"{'ID':<4} {'CGID':<22} {'PROGRAM':<20} UNIT"]
-            for cid, info in sorted(containers.items()):
-                program = " ".join(info.get("program", []))
-                lines.append(
-                    f"{cid:<4} {info['cgid']:<22} {program:<20} {info['unit_name']}"
-                )
-            return "\n".join(lines)
+        if not containers:
+            return "(no active containers)"
+        lines = [f"{'ID':<4} {'CGID':<22} {'PROGRAM':<20} UNIT"]
+        for cid, info in sorted(containers.items()):
+            program = " ".join(info.get("program", []))
+            lines.append(
+                f"{cid:<4} {info['cgid']:<22} {program:<20} {info['unit_name']}"
+            )
+        return "\n".join(lines)
 
     if action == "list":
         if len(parts) < 2:
@@ -284,8 +281,7 @@ def _handle_command(cmd: str) -> str:
             cid = _parse_container_id(parts[1])
         except ValueError:
             return f"ERROR: invalid container id: {parts[1]}"
-        with containers_lock:
-            info = containers.get(cid)
+        info = containers.get(cid)
         if info is None:
             return f"ERROR: container {cid} not found"
         return f"rules for container {cid}:\n{info['config'].list_paths()}"
@@ -300,8 +296,7 @@ def _handle_command(cmd: str) -> str:
         path = parts[2].strip()
         if not path:
             return "ERROR: empty path"
-        with containers_lock:
-            info = containers.get(cid)
+        info = containers.get(cid)
         if info is None:
             return f"ERROR: container {cid} not found"
         config = info["config"]
@@ -323,8 +318,7 @@ def _handle_command(cmd: str) -> str:
             cid = _parse_container_id(parts[2])
         except ValueError:
             return f"ERROR: invalid container id: {parts[2]}"
-        with containers_lock:
-            info = containers.get(cid)
+        info = containers.get(cid)
         if info is None:
             return f"ERROR: container {cid} not found"
         config = info["config"]
@@ -335,8 +329,7 @@ def _handle_command(cmd: str) -> str:
                 cid = _parse_container_id(parts[2])
             except ValueError:
                 return f"ERROR: invalid container id: {parts[2]}"
-            with containers_lock:
-                info = containers.get(cid)
+            info = containers.get(cid)
             if info is None:
                 return f"ERROR: container {cid} not found"
             config = info["config"]
@@ -416,13 +409,12 @@ def launch_container(b: BPF, program: List[str], baseline_paths: List[str]) -> i
     cgid = cgid_map[container_id]
     unit_name = cgroup_path.split("/", 1)[1] if "/" in cgroup_path else cgroup_path
 
-    with containers_lock:
-        containers[container_id] = {
-            "config": config,
-            "cgid": cgid,
-            "unit_name": unit_name,
-            "program": list(program),
-        }
+    containers[container_id] = {
+        "config": config,
+        "cgid": cgid,
+        "unit_name": unit_name,
+        "program": list(program),
+    }
     return container_id
 
 
@@ -472,9 +464,6 @@ def main():
     program = sys.argv[1:] if len(sys.argv) > 1 else ["sh"]
     cid = launch_container(b, program, baseline)
 
-    ctl_thread = threading.Thread(target=control_server, daemon=True)
-    ctl_thread.start()
-
     info = containers[cid]
     print(
         f"[daemon] container {cid} running '{' '.join(program)}' "
@@ -483,7 +472,7 @@ def main():
     print(f"[daemon] control socket: {SOCK_PATH}")
 
     try:
-        b.trace_print()
+        control_server()
     except KeyboardInterrupt:
         print("\n[daemon] shutting down")
     finally:
