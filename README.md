@@ -29,7 +29,7 @@ There are two main environments Bumblewrap supports:
 
 ### Bumblewrap OS
 
-The easiest way to try out Bumblewrap is with **Bumblewrap OS**, a minimal Arch Linux-based live image with Bumblewrap pre-installed. To run it, [download the ISO](https://github.com/juneguo257/bumblewrap/releases/download/2026-04-29/bumblewrap-os-2026.04.29-x86_64.iso) and fire it up in your favorite hypervisor. We've tested it in on QEMU, but in theory there is no reason it shouldn't work on VirtualBox, Hyper-V, Xen, or similar software.
+The easiest way to try out Bumblewrap is with **Bumblewrap OS**, a minimal Arch Linux-based live image with Bumblewrap pre-installed. To run it, [download the ISO](https://github.com/juneguo257/bumblewrap/releases/download/2026-04-29/bumblewrap-os-2026.04.29-x86_64.iso) and fire it up in your favorite hypervisor. We've tested it on QEMU, but in theory there is no reason it shouldn't work on VirtualBox, Hyper-V, Xen, or similar software.
 
 Bumblewrap OS should run fine with just 4 GB of RAM. It does not use persistent storage, so there is no need to allocate a virtual disk other than the ISO. It comes with a bare-bones version of GNOME 50, Ptyxis as a terminal emulator, and `vim` for text editing.
 
@@ -77,6 +77,8 @@ To run a program sandboxed with `bumblewrap`, run:
 sudo python3 bumblewrap.py [PROGRAM_NAME]
 ```
 
+`bumblewrap` outputs debug logs via the kernel's tracing system. To display these logs as they are produced, run `sudo cat /sys/kernel/tracing/trace_pipe` in a different terminal.
+
 ## bumblewrapctl
 
 `bumblewrapctl.py` allows you to change the permission settings of your sandbox on the fly after initialization! Here are the possible commands:
@@ -91,6 +93,9 @@ sudo ./bumblewrapctl.py syscall list
 sudo ./bumblewrapctl.py syscall allow kill
 sudo ./bumblewrapctl.py syscall deny kill
 ```
+
+> [!NOTE]
+> When adding a directory, make sure the path ends in a trailing slash (e.g. `/home/user/project/`).
 
 There are a few other options to tweak as well-- see `bumblewrapctl.py` for more information.
 
